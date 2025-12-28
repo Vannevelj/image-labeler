@@ -30,3 +30,15 @@ jobs:
       with:
         name: image-labeler-windows
         path: target/x86_64-pc-windows-msvc/release/image-labeler.exe
+
+    - name: Create Release
+      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+      uses: softprops/action-gh-release@v2
+      with:
+        files: target/x86_64-pc-windows-msvc/release/image-labeler.exe
+        tag_name: v${{ github.run_number }}
+        name: Release v${{ github.run_number }}
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
