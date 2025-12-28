@@ -9,6 +9,7 @@ use tokio::time::{sleep, Duration};
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Path to the directory containing JPEG files
+    #[arg(default_value = ".")]
     path: PathBuf,
 }
 
@@ -184,6 +185,6 @@ fn rename_file(path: &Path, response: &GeocodeResponse, date: &str, sequence: u3
     let new_path = path.with_file_name(new_name);
 
     println!("  Renaming to: {:?}", new_path);
-    //fs::rename(path, new_path)?;
+    fs::rename(path, new_path)?;
     Ok(())
 }
