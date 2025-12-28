@@ -29,7 +29,7 @@ struct GeocodeResponse {
     address: Address,
 }
 
-const API_KEY: &str = "";
+const API_KEY: &str = "692f950529d1f964657378ztj33fdb0";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
