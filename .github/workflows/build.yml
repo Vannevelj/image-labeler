@@ -1,0 +1,32 @@
+name: Build Windows Executable
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: x86_64-pc-windows-msvc
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build
+      run: cargo build --release --target x86_64-pc-windows-msvc
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: image-labeler-windows
+        path: target/x86_64-pc-windows-msvc/release/image-labeler.exe

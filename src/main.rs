@@ -14,11 +14,13 @@ struct Args {
 
 #[derive(Deserialize, Debug)]
 struct Address {
+    road: Option<String>,
     city: Option<String>,
     town: Option<String>,
     village: Option<String>,
     state: Option<String>,
-    country: Option<String>
+    country: Option<String>,
+    country_code: Option<String>
 }
 
 #[derive(Deserialize, Debug)]
@@ -27,7 +29,7 @@ struct GeocodeResponse {
     address: Address,
 }
 
-const API_KEY: &str = "692f950529d1f964657378ztj33fdb0";
+const API_KEY: &str = "";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,24 +40,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
+    let mut sequence = 1;
+
     for entry in fs::read_dir(args.path)? {
         let entry = entry?;
         let path = entry.path();
 
         if is_jpeg(&path) {
             println!("Processing: {:?}", path);
-            if let Some((lat, lon)) = extract_coords(&path) {
+            let metadata = extract_metadata(&path);
+            if let Some((lat, lon, date)) = metadata {
                 println!("  Found coordinates: {}, {}", lat, lon);
+                println!("  Found date: {}", date);
                 // Sleep for 1 second to respect API rate limits
                 sleep(Duration::from_secs(1)).await;
                 match get_location(lat, lon).await {
-                    Ok(location) => {
-                        rename_file(&path, &location)?;
+                    Ok(location_response) => {
+                        rename_file(&path, &location_response, &date, sequence)?;
+                        sequence += 1;
                     }
                     Err(e) => eprintln!("  Error getting location: {}", e),
                 }
             } else {
-                println!("  No GPS metadata found.");
+                println!("  Missing GPS or Date metadata.");
             }
         }
     }
@@ -68,7 +75,7 @@ fn is_jpeg(path: &Path) -> bool {
     ext == "jpg" || ext == "jpeg"
 }
 
-fn extract_coords(path: &Path) -> Option<(f64, f64)> {
+fn extract_metadata(path: &Path) -> Option<(f64, f64, String)> {
     let file = fs::File::open(path).ok()?;
     let mut bufreader = std::io::BufReader::new(&file);
     let reader = exif::Reader::new();
@@ -85,7 +92,24 @@ fn extract_coords(path: &Path) -> Option<(f64, f64)> {
     let lat_final = if lat_ref.display_value().to_string().contains('S') { -latitude } else { latitude };
     let lon_final = if lon_ref.display_value().to_string().contains('W') { -longitude } else { longitude };
 
-    Some((lat_final, lon_final))
+    // Extract date
+    let date_str = exif.get_field(Tag::DateTimeOriginal, In::PRIMARY)
+        .or_else(|| exif.get_field(Tag::DateTime, In::PRIMARY))?
+        .display_value()
+        .to_string();
+
+    // Format yyyy:mm:dd hh:mm:ss to yyyyMMdd
+    // exif display_value is often "2023:10:24 12:00:00"
+    let yyyymmdd = date_str.chars()
+        .filter(|c| c.is_digit(10))
+        .take(8)
+        .collect::<String>();
+
+    if yyyymmdd.len() == 8 {
+        Some((lat_final, lon_final, yyyymmdd))
+    } else {
+        None
+    }
 }
 
 fn to_decimal(field: &exif::Field) -> Option<f64> {
@@ -117,21 +141,35 @@ async fn get_location(lat: f64, lon: f64) -> Result<GeocodeResponse, Box<dyn std
     Ok(response)
 }
 
-fn rename_file(path: &Path, response: &GeocodeResponse) -> std::io::Result<()> {
-    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+fn rename_file(path: &Path, response: &GeocodeResponse, date: &str, sequence: u32) -> std::io::Result<()> {
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
     
+    let road = response.address.road.as_deref();
     let town_or_city = response.address.town.as_deref()
         .or(response.address.city.as_deref())
         .or(response.address.village.as_deref());
         
     let country = response.address.country.as_deref();
+    let country_code = response.address.country_code.as_deref().unwrap_or("unknown").to_uppercase();
 
-    let location = match (town_or_city, country) {
-        (Some(place), Some(country)) => format!("{}, {}", place, country),
-        (Some(place), None) => place.to_string(),
-        (None, Some(country)) => country.to_string(),
-        (None, None) => response.display_name.clone(),
+    let mut location_parts = Vec::new();
+
+    if let Some(place) = town_or_city {
+        location_parts.push(place.to_string());
+    }
+
+    if let Some(r) = road {
+        location_parts.push(r.to_string());
+    }
+
+    if location_parts.is_empty() && let Some(c) = country {
+        location_parts.push(c.to_string());
+    }
+
+    let location = if location_parts.is_empty() {
+        response.display_name.clone()
+    } else {
+        location_parts.join(", ")
     };
     
     // Sanitize location for filename
@@ -142,10 +180,10 @@ fn rename_file(path: &Path, response: &GeocodeResponse) -> std::io::Result<()> {
         .collect::<Vec<_>>()
         .join(" ");
 
-    let new_name = format!("{}, {}.{}", stem, safe_location, extension);
+    let new_name = format!("{}_{}_{}, {}.{}", date, sequence, country_code, safe_location, extension);
     let new_path = path.with_file_name(new_name);
 
     println!("  Renaming to: {:?}", new_path);
-    fs::rename(path, new_path)?;
+    //fs::rename(path, new_path)?;
     Ok(())
 }
