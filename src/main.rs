@@ -30,10 +30,17 @@ struct GeocodeResponse {
     address: Address,
 }
 
-const API_KEY: &str = "692f950529d1f964657378ztj33fdb0";
+const API_KEY: &str = match option_env!("API_KEY") {
+    Some(key) => key,
+    None => "REPLACE_ME_AT_BUILD_TIME",
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if API_KEY == "REPLACE_ME_AT_BUILD_TIME" {
+        eprintln!("Warning: API_KEY was not provided at build time. Reverse geocoding will fail.");
+    }
+
     let args = Args::parse();
 
     if !args.path.is_dir() {
