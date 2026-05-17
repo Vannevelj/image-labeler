@@ -1,4 +1,4 @@
-name: Build Windows Executable
+name: Build and Release
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
+  build-windows:
     runs-on: windows-latest
     permissions:
       contents: write
@@ -35,11 +35,63 @@ jobs:
         name: image-labeler-windows
         path: target/x86_64-pc-windows-msvc/release/image-labeler.exe
 
+  build-macos:
+    runs-on: macos-latest
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: aarch64-apple-darwin
+
+    - name: Rust Cache
+      uses: Swatinem/rust-cache@v2
+
+    - name: Build
+      run: cargo build --release --target aarch64-apple-darwin
+      env:
+        API_KEY: ${{ secrets.API_KEY }}
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: image-labeler-macos
+        path: target/aarch64-apple-darwin/release/image-labeler
+
+  release:
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download Windows artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: image-labeler-windows
+        path: artifacts/windows
+
+    - name: Download macOS artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: image-labeler-macos
+        path: artifacts/macos
+
+    - name: Rename artifacts
+      run: |
+        mv artifacts/windows/image-labeler.exe artifacts/image-labeler-windows.exe
+        mv artifacts/macos/image-labeler artifacts/image-labeler-macos
     - name: Create Release
-      if: github.event_name == 'push' && github.ref == 'refs/heads/main'
       uses: softprops/action-gh-release@v2
       with:
-        files: target/x86_64-pc-windows-msvc/release/image-labeler.exe
+        files: |
+          artifacts/image-labeler-windows.exe
+          artifacts/image-labeler-macos
         tag_name: v${{ github.run_number }}
         name: Release v${{ github.run_number }}
         draft: false
