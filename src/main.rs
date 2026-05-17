@@ -68,16 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // Skip files that already match the expected naming pattern (already renamed)
-        let file_name = path.file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        // Pattern: yyyymmdd_N_CC, ... e.g. "20231024_1_US, New York, ..."
-        if looks_already_renamed(file_name) {
-            println!("Skipping (already renamed): {:?}", path);
-            continue;
-        }
-
         println!("Scanning: {:?}", path);
         match extract_metadata(&path) {
             Some(info) => {
@@ -123,20 +113,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Returns true if the filename already looks like it was produced by this tool.
-/// Expected pattern: 8 digits, underscore, digits, underscore, 2+ uppercase letters, comma.
-/// Example: "20231024_1_US, New York, 5th Avenue.jpg"
-fn looks_already_renamed(name: &str) -> bool {
-    // Quick heuristic: starts with 8 digits followed by '_'
-    let bytes = name.as_bytes();
-    if bytes.len() < 10 {
-        return false;
-    }
-    let first_eight_digits = bytes[..8].iter().all(|b| b.is_ascii_digit());
-    let underscore = bytes[8] == b'_';
-    first_eight_digits && underscore
 }
 
 fn is_supported_image(path: &Path) -> bool {
