@@ -1,6 +1,7 @@
 use clap::Parser;
 use exif::{In, Tag};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
@@ -8,7 +9,7 @@ use tokio::time::{sleep, Duration};
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Path to the directory containing JPEG files
+    /// Path to the directory containing image files
     #[arg(default_value = ".")]
     path: PathBuf,
 }
@@ -30,6 +31,14 @@ struct GeocodeResponse {
     address: Address,
 }
 
+struct FileInfo {
+    path: PathBuf,
+    lat: f64,
+    lon: f64,
+    date: String,
+    sort_key: String,
+}
+
 const API_KEY: &str = match option_env!("API_KEY") {
     Some(key) => key,
     None => "REPLACE_ME_AT_BUILD_TIME",
@@ -48,29 +57,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    let mut sequence = 1;
+    // Collect all supported image files with their metadata
+    let mut file_infos: Vec<FileInfo> = Vec::new();
 
-    for entry in fs::read_dir(args.path)? {
+    for entry in fs::read_dir(&args.path)? {
         let entry = entry?;
         let path = entry.path();
 
-        if is_jpeg(&path) {
-            println!("Processing: {:?}", path);
-            let metadata = extract_metadata(&path);
-            if let Some((lat, lon, date)) = metadata {
-                println!("  Found coordinates: {}, {}", lat, lon);
-                println!("  Found date: {}", date);
-                // Sleep for 1 second to respect API rate limits
-                sleep(Duration::from_secs(1)).await;
-                match get_location(lat, lon).await {
-                    Ok(location_response) => {
-                        rename_file(&path, &location_response, &date, sequence)?;
-                        sequence += 1;
-                    }
-                    Err(e) => eprintln!("  Error getting location: {}", e),
+        if !is_supported_image(&path) {
+            continue;
+        }
+
+        // Skip files that already match the expected naming pattern (already renamed)
+        let file_name = path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+        // Pattern: yyyymmdd_N_CC, ... e.g. "20231024_1_US, New York, ..."
+        if looks_already_renamed(file_name) {
+            println!("Skipping (already renamed): {:?}", path);
+            continue;
+        }
+
+        println!("Scanning: {:?}", path);
+        match extract_metadata(&path) {
+            Some(info) => {
+                file_infos.push(info);
+            }
+            None => {
+                println!("  Missing GPS or Date metadata, skipping.");
+            }
+        }
+    }
+
+    // Group files by date (yyyymmdd)
+    let mut by_date: HashMap<String, Vec<FileInfo>> = HashMap::new();
+    for info in file_infos {
+        by_date.entry(info.date.clone()).or_default().push(info);
+    }
+
+    // Sort dates so we process them in chronological order
+    let mut dates: Vec<String> = by_date.keys().cloned().collect();
+    dates.sort();
+
+    for date in dates {
+        let group = by_date.get_mut(&date).unwrap();
+        // Sort within the day by full datetime (sort_key is the 14-digit numeric string)
+        group.sort_by(|a, b| a.sort_key.cmp(&b.sort_key));
+
+        let mut sequence: u32 = 1;
+
+        for info in group.iter() {
+            println!("Processing: {:?}", info.path);
+            println!("  Found coordinates: {}, {}", info.lat, info.lon);
+            println!("  Found date: {}", info.date);
+            // Sleep for 1 second to respect API rate limits
+            sleep(Duration::from_secs(1)).await;
+            match get_location(info.lat, info.lon).await {
+                Ok(location_response) => {
+                    rename_file(&info.path, &location_response, &info.date, sequence)?;
+                    sequence += 1;
                 }
-            } else {
-                println!("  Missing GPS or Date metadata.");
+                Err(e) => eprintln!("  Error getting location: {}", e),
             }
         }
     }
@@ -78,12 +125,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn is_jpeg(path: &Path) -> bool {
-    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    ext == "jpg" || ext == "jpeg"
+/// Returns true if the filename already looks like it was produced by this tool.
+/// Expected pattern: 8 digits, underscore, digits, underscore, 2+ uppercase letters, comma.
+/// Example: "20231024_1_US, New York, 5th Avenue.jpg"
+fn looks_already_renamed(name: &str) -> bool {
+    // Quick heuristic: starts with 8 digits followed by '_'
+    let bytes = name.as_bytes();
+    if bytes.len() < 10 {
+        return false;
+    }
+    let first_eight_digits = bytes[..8].iter().all(|b| b.is_ascii_digit());
+    let underscore = bytes[8] == b'_';
+    first_eight_digits && underscore
 }
 
-fn extract_metadata(path: &Path) -> Option<(f64, f64, String)> {
+fn is_supported_image(path: &Path) -> bool {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    ext == "jpg" || ext == "jpeg" || ext == "heic"
+}
+
+fn extract_metadata(path: &Path) -> Option<FileInfo> {
     let file = fs::File::open(path).ok()?;
     let mut bufreader = std::io::BufReader::new(&file);
     let reader = exif::Reader::new();
@@ -100,24 +161,33 @@ fn extract_metadata(path: &Path) -> Option<(f64, f64, String)> {
     let lat_final = if lat_ref.display_value().to_string().contains('S') { -latitude } else { latitude };
     let lon_final = if lon_ref.display_value().to_string().contains('W') { -longitude } else { longitude };
 
-    // Extract date
+    // Extract date — prefer DateTimeOriginal, fall back to DateTime
     let date_str = exif.get_field(Tag::DateTimeOriginal, In::PRIMARY)
         .or_else(|| exif.get_field(Tag::DateTime, In::PRIMARY))?
         .display_value()
         .to_string();
 
-    // Format yyyy:mm:dd hh:mm:ss to yyyyMMdd
     // exif display_value is often "2023:10:24 12:00:00"
-    let yyyymmdd = date_str.chars()
-        .filter(|c| c.is_digit(10))
-        .take(8)
-        .collect::<String>();
+    // Strip all non-digit characters to get a 14-digit sort key: yyyymmddHHMMSS
+    let all_digits: String = date_str.chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
 
-    if yyyymmdd.len() == 8 {
-        Some((lat_final, lon_final, yyyymmdd))
-    } else {
-        None
+    if all_digits.len() < 8 {
+        return None;
     }
+
+    // First 8 digits = yyyymmdd, all 14 = sort key
+    let yyyymmdd = all_digits[..8].to_string();
+    let sort_key = all_digits[..all_digits.len().min(14)].to_string();
+
+    Some(FileInfo {
+        path: path.to_path_buf(),
+        lat: lat_final,
+        lon: lon_final,
+        date: yyyymmdd,
+        sort_key,
+    })
 }
 
 fn to_decimal(field: &exif::Field) -> Option<f64> {
@@ -151,12 +221,12 @@ async fn get_location(lat: f64, lon: f64) -> Result<GeocodeResponse, Box<dyn std
 
 fn rename_file(path: &Path, response: &GeocodeResponse, date: &str, sequence: u32) -> std::io::Result<()> {
     let extension = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-    
+
     let road = response.address.road.as_deref();
     let town_or_city = response.address.town.as_deref()
         .or(response.address.city.as_deref())
         .or(response.address.village.as_deref());
-        
+
     let country = response.address.country.as_deref();
     let country_code = response.address.country_code.as_deref().unwrap_or("unknown").to_uppercase();
 
@@ -179,7 +249,7 @@ fn rename_file(path: &Path, response: &GeocodeResponse, date: &str, sequence: u3
     } else {
         location_parts.join(", ")
     };
-    
+
     // Sanitize location for filename
     let safe_location = location.chars()
         .map(|c| if c.is_alphanumeric() || c == ' ' || c == ',' { c } else { '_' })
