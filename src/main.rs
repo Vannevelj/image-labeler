@@ -3,6 +3,7 @@ use exif::{In, Tag};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use tokio::time::{sleep, Duration};
 
@@ -111,6 +112,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+
+    println!("\nDone. Press Enter to exit...");
+    let _ = io::stdin().read(&mut [0u8]);
 
     Ok(())
 }
